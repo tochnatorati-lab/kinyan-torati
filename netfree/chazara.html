@@ -866,7 +866,7 @@ const PENDING_KEY = 'chazara_pending_v1';
 let transientOffline = false;
 const expandedGroups = new Set();
 // bump on every change to the file, so it's clear which copy is in use
-const APP_VERSION = '4.4';
+const APP_VERSION = '4.5';
 // Where updates are published (version.json + chazara.html). Empty = updates are off.
 // The launcher (app\launch.vbs) reads this same line, so it is the only place to set it.
 const UPDATE_BASE_URL = 'https://raw.githubusercontent.com/tochnatorati-lab/kinyan-torati/main/netfree/';
@@ -1004,17 +1004,23 @@ function thinkingConfigFor(model){
   if(major === 2) return { thinkingBudget: /lite/.test(model) ? 0 : 512 };
   return null;
 }
-async function callClaudeRawOnce(systemPrompt, userText, key, model){
+const noJsonMode = new Set();
+async function callClaudeRawOnce(systemPrompt, userText, key, model, json){
   const body = { systemInstruction:{parts:[{text:systemPrompt}]}, contents:[{role:'user',parts:[{text:userText}]}] };
   const tc = thinkingConfigFor(model);
-  if(tc) body.generationConfig = { thinkingConfig: tc };
+  const gc = {};
+  if(tc) gc.thinkingConfig = tc;
+  // JSON mode: Google escapes quotes itself, so ד"ה / רש"י inside a field can't break the answer
+  if(json && !noJsonMode.has(model)) gc.responseMimeType = 'application/json';
+  if(Object.keys(gc).length) body.generationConfig = gc;
   const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(key)}`, {
     method: 'POST', headers: { 'Content-Type':'application/json' },
     body: JSON.stringify(body)
   });
   if(!response.ok){
     let bodyText=''; try{bodyText=await response.text();}catch(e){}
-    if(tc && response.status === 400 && /thinking/i.test(bodyText)){ noThinkCfg.add(model); return callClaudeRawOnce(systemPrompt, userText, key, model); }
+    if(tc && response.status === 400 && /thinking/i.test(bodyText)){ noThinkCfg.add(model); return callClaudeRawOnce(systemPrompt, userText, key, model, json); }
+    if(gc.responseMimeType && response.status === 400 && /mime|json/i.test(bodyText)){ noJsonMode.add(model); return callClaudeRawOnce(systemPrompt, userText, key, model, json); }
     const err = new Error(`שגיאת API ${response.status} (${model}): ${bodyText.slice(0,300)}`);
     err.status = response.status;
     throw err;
@@ -1041,25 +1047,25 @@ async function mapLimit(items, limit, fn){
 }
 // several keys: start from the one that worked last; when a key is out of quota (or rejected), move on to the next
 let keyIdx = 0;
-async function callClaudeRaw(systemPrompt, userText){
+async function callClaudeRaw(systemPrompt, userText, json){
   const keys = allApiKeys();
   if(!keys.length) throw new Error('צריך להגדיר מפתח API בהגדרות קודם.');
   if(keyIdx >= keys.length) keyIdx = 0;
   let lastErr = null;
   for(let n = 0; n < keys.length; n++){
     const i = (keyIdx + n) % keys.length;
-    try{ const t = await callWithKey(systemPrompt, userText, keys[i]); keyIdx = i; return t; }
+    try{ const t = await callWithKey(systemPrompt, userText, keys[i], json); keyIdx = i; return t; }
     catch(e){
       lastErr = e;
       const keyProblem = e.status === 429 || e.status === 403 || e.status === 401 || (e.status === 400 && /api.?key/i.test(e.message));
       if(!keyProblem || keys.length === 1) throw e;
     }
   }
-  if(lastErr && lastErr.status === 429) throw new Error(`המכסה של כל ${keys.length} המפתחות נגמרה כרגע. אפשר לנסות שוב מאוחר יותר, או להוסיף מפתח מחשבון גוגל נוסף בהגדרות.`);
+  if(lastErr && lastErr.status === 429) throw Object.assign(new Error(`המכסה של כל ${keys.length} המפתחות נגמרה כרגע. אפשר לנסות שוב מאוחר יותר, או להוסיף מפתח מחשבון גוגל נוסף בהגדרות.`), { status: 429 });
   throw lastErr;
 }
 // 503/429 = Google's model is overloaded: retry briefly, then fall back to the next model. A used-up quota is not retried.
-async function callWithKey(systemPrompt, userText, key){
+async function callWithKey(systemPrompt, userText, key, json){
   await discoverModels(key);
   const order = goodModel ? [goodModel, ...MODELS.filter(m => m !== goodModel)] : MODELS;
   let lastErr = null;
@@ -1067,7 +1073,7 @@ async function callWithKey(systemPrompt, userText, key){
     const delays = [1500, 3500];
     for(let attempt = 0; attempt <= delays.length; attempt++){
       try{
-        const t = await callClaudeRawOnce(systemPrompt, userText, key, model);
+        const t = await callClaudeRawOnce(systemPrompt, userText, key, model, json);
         if(goodModel !== model){ goodModel = model; saveModelsCache(key); }
         return t;
       }catch(e){
@@ -1089,9 +1095,18 @@ function extractJson(t){
   const ec=cleaned.lastIndexOf('}'), es=cleaned.lastIndexOf(']');
   const end = Math.max(ec,es);
   if(start===-1||end===-1||end<start) throw new Error('לא התקבל JSON תקין: '+cleaned.slice(0,200));
-  return JSON.parse(cleaned.slice(start,end+1));
+  const raw = cleaned.slice(start,end+1);
+  try{ return JSON.parse(raw); }
+  catch(e){
+    // the model sometimes writes ד"ה / רש"י / ט"ז with a plain quote inside a value: turn those into gershayim and try again
+    const fixed = raw.replace(/([\u05D0-\u05EA])"(?=[\u05D0-\u05EA])/g, '$1״').replace(/,\s*([\]}])/g, '$1');
+    try{ return JSON.parse(fixed); }catch(e2){ throw new Error('התשובה מהמודל לא הגיעה בפורמט תקין. כדאי לנסות שוב.'); }
+  }
 }
-async function askClaudeJson(systemPrompt, userText){ return extractJson(await callClaudeRaw(systemPrompt, userText)); }
+async function askClaudeJson(systemPrompt, userText){
+  try{ return extractJson(await callClaudeRaw(systemPrompt, userText, true)); }
+  catch(e){ if(e.status || isNetworkError(e)) throw e; return extractJson(await callClaudeRaw(systemPrompt, userText, true)); } // one retry on a garbled answer
+}
 
 // ---------- Storage ----------
 function storageAvailable(){ try{ const k='__t__'; localStorage.setItem(k,'1'); localStorage.removeItem(k); return true; }catch(e){ return false; } }
