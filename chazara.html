@@ -231,6 +231,10 @@
   .feedback.fb-incorrect{ border-color:var(--c-incorrect); background: color-mix(in srgb, var(--c-incorrect) 7%, var(--paper-2)); }
   .detail-panel{ margin-top: 12px; padding: 16px 18px; background: var(--surface); border: 1px solid var(--gold-soft); border-radius: var(--radius); font-size: 14.5px; line-height: 1.75; white-space:pre-line; }
   .actions-row{ margin-top: 16px; display:flex; gap:10px; flex-wrap:wrap; }
+  .xkey-list{ display:flex; flex-direction:column; gap:6px; margin:6px 0 8px; }
+  .xkey-row{ display:flex; align-items:center; justify-content:space-between; gap:8px; background:var(--surface-2); border:1px solid var(--line); border-radius:var(--radius); padding:6px 10px; font-size:14px; direction:ltr; }
+  .xkey-row button{ background:none; border:none; color:var(--ink-soft); cursor:pointer; font-size:15px; padding:2px 6px; }
+  .xkey-row button:hover{ color:var(--error); }
   .count{ color: var(--ink-soft); font-size: 12.5px; }
   .highlight-card{ position:relative; padding: 30px 28px 24px; background: linear-gradient(180deg, var(--surface), var(--paper-2)); border: 1px solid var(--gold-soft); border-radius: var(--radius-lg); box-shadow: var(--shadow-md); overflow:hidden; }
   .highlight-card::before{ content:'״'; position:absolute; top:-18px; left:18px; font-family:var(--serif); font-size:120px; line-height:1; color:var(--gold); opacity:.14; pointer-events:none; }
@@ -704,6 +708,16 @@
       <button class="btn small secondary" id="btn-delete-key" style="display:none;">מחק מפתח</button>
     </div>
     <div class="hint">מוציאים מפתח חינמי ב-<a class="link" href="https://aistudio.google.com/apikey" target="_blank">aistudio.google.com</a>.</div>
+    <details class="stats-folder" id="xkeys-folder" style="margin-top:12px;">
+      <summary>מפתחות נוספים (לא חובה)</summary>
+      <div class="hint" style="margin-top:8px;">כשהמכסה של מפתח נגמרת או שיש עומס, התוכנה עוברת לבד למפתח הבא. כל מפתח מחשבון גוגל אחר מוסיף עוד מכסה.</div>
+      <div class="xkey-list" id="xkey-list"></div>
+      <div style="display:flex; gap:8px;">
+        <input type="password" id="xkey-input" placeholder="AIza..." autocomplete="off" style="flex:1; min-width:0;">
+        <button class="btn small" id="btn-add-xkey" type="button">הוסף מפתח</button>
+      </div>
+      <div class="hint" id="xkey-status"></div>
+    </details>
 
     <label class="field-label" style="margin-top:20px;">מה להציג בחזרה</label>
     <select id="review-mode-select">
@@ -852,7 +866,7 @@ const PENDING_KEY = 'chazara_pending_v1';
 let transientOffline = false;
 const expandedGroups = new Set();
 // bump on every change to the file, so it's clear which copy is in use
-const APP_VERSION = '4.3';
+const APP_VERSION = '4.4';
 // Where updates are published (version.json + chazara.html). Empty = updates are off.
 // The launcher (app\launch.vbs) reads this same line, so it is the only place to set it.
 const UPDATE_BASE_URL = 'https://raw.githubusercontent.com/tochnatorati-lab/kinyan-torati/main/';
@@ -883,9 +897,36 @@ function questionDepth(){ const v = localStorage.getItem(DEPTH_KEY); return ['ba
 el('depth-select').addEventListener('change', () => localStorage.setItem(DEPTH_KEY, el('depth-select').value));
 
 // ---------- API key (Gemini) ----------
-function getApiKey(){ return localStorage.getItem(KEY_KEY) || ''; }
+// extra keys (other Google accounts) add quota; like the main key they stay on this device and are not in the backup
+const EXTRA_KEYS_KEY = 'chazara_api_keys_extra_v1';
+function getExtraKeys(){ try{ const a = JSON.parse(localStorage.getItem(EXTRA_KEYS_KEY) || '[]'); return Array.isArray(a) ? a.filter(k => typeof k === 'string' && k) : []; }catch(e){ return []; } }
+function setExtraKeys(a){ try{ localStorage.setItem(EXTRA_KEYS_KEY, JSON.stringify(a)); }catch(e){} }
+function allApiKeys(){ return [...new Set([localStorage.getItem(KEY_KEY) || '', ...getExtraKeys()].filter(Boolean))]; }
+function getApiKey(){ return allApiKeys()[0] || ''; }
+function maskKey(k){ return k.slice(0,4) + '…' + k.slice(-4); }
+function renderExtraKeys(){
+  const list = getExtraKeys();
+  el('xkey-list').innerHTML = list.map((k, i) => `<div class="xkey-row"><span>${escapeHtml(maskKey(k))}</span><button type="button" data-del-xkey="${i}" title="הסר" aria-label="הסרת המפתח">✕</button></div>`).join('');
+  el('xkey-list').querySelectorAll('[data-del-xkey]').forEach(b => b.addEventListener('click', () => {
+    const a = getExtraKeys(); a.splice(Number(b.dataset.delXkey), 1); setExtraKeys(a); keyIdx = 0; renderExtraKeys();
+  }));
+  if(list.length) el('xkeys-folder').open = true;
+}
+el('btn-add-xkey').addEventListener('click', async () => {
+  const val = el('xkey-input').value.trim();
+  if(!val){ el('xkey-input').focus(); return; }
+  if(allApiKeys().includes(val)){ el('xkey-status').textContent = 'המפתח הזה כבר שמור.'; return; }
+  setExtraKeys([...getExtraKeys(), val]); el('xkey-input').value = ''; el('xkey-status').textContent = 'המפתח נוסף.';
+  renderExtraKeys(); refreshKeyStatus(); processQueue();
+  if(!navigator.onLine) return;
+  try{
+    const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?pageSize=1&key=${encodeURIComponent(val)}`);
+    el('xkey-status').innerHTML = r.ok ? '<span style="color:var(--good)">המפתח נוסף ועובד ✓</span>' : '<span style="color:var(--error)">גוגל דחה את המפתח, כדאי לבדוק שהועתק במלואו</span>';
+  }catch(e){}
+});
 function refreshKeyStatus(){
-  const key = getApiKey();
+  const key = localStorage.getItem(KEY_KEY) || '';
+  renderExtraKeys();
   el('key-status').innerHTML = key ? '<span class="status-dot ok"></span>מפתח שמור: '+escapeHtml(key.slice(0,4))+'…'+escapeHtml(key.slice(-4)) : '<span class="status-dot bad"></span>לא הוגדר מפתח';
   el('api-key-input').placeholder = key ? 'להחלפה: הדבק כאן מפתח חדש' : 'AIza...';
   el('btn-save-key').textContent = key ? 'החלף מפתח' : 'שמור מפתח';
@@ -998,10 +1039,27 @@ async function mapLimit(items, limit, fn){
   if(stop) throw stop;
   return out;
 }
-// 503/429 = Google's model is overloaded (not your quota): retry briefly, then fall back to the next model.
+// several keys: start from the one that worked last; when a key is out of quota (or rejected), move on to the next
+let keyIdx = 0;
 async function callClaudeRaw(systemPrompt, userText){
-  const key = getApiKey();
-  if(!key) throw new Error('צריך להגדיר מפתח API בהגדרות קודם.');
+  const keys = allApiKeys();
+  if(!keys.length) throw new Error('צריך להגדיר מפתח API בהגדרות קודם.');
+  if(keyIdx >= keys.length) keyIdx = 0;
+  let lastErr = null;
+  for(let n = 0; n < keys.length; n++){
+    const i = (keyIdx + n) % keys.length;
+    try{ const t = await callWithKey(systemPrompt, userText, keys[i]); keyIdx = i; return t; }
+    catch(e){
+      lastErr = e;
+      const keyProblem = e.status === 429 || e.status === 403 || e.status === 401 || (e.status === 400 && /api.?key/i.test(e.message));
+      if(!keyProblem || keys.length === 1) throw e;
+    }
+  }
+  if(lastErr && lastErr.status === 429) throw new Error(`המכסה של כל ${keys.length} המפתחות נגמרה כרגע. אפשר לנסות שוב מאוחר יותר, או להוסיף מפתח מחשבון גוגל נוסף בהגדרות.`);
+  throw lastErr;
+}
+// 503/429 = Google's model is overloaded: retry briefly, then fall back to the next model. A used-up quota is not retried.
+async function callWithKey(systemPrompt, userText, key){
   await discoverModels(key);
   const order = goodModel ? [goodModel, ...MODELS.filter(m => m !== goodModel)] : MODELS;
   let lastErr = null;
@@ -1017,6 +1075,7 @@ async function callClaudeRaw(systemPrompt, userText){
         if(e.status === 404 || e.status === 400 && /model/i.test(e.message)) break;
         const transient = e.status === 503 || e.status === 429 || e.status === 500;
         if(!transient) throw e;
+        if(e.status === 429 && /quota|exhausted/i.test(e.message)) break;
         if(attempt < delays.length) await sleep(delays[attempt]);
       }
     }
