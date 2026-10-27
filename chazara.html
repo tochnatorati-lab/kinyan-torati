@@ -170,10 +170,12 @@
   .card-tool:hover{ color:var(--ink); border-color:var(--line-strong); background:var(--surface); }
   .card-tool.danger:hover{ color:var(--error); border-color:var(--error); background:var(--error-bg); }
   .meta-row .meta-end{ display:flex; align-items:center; gap:6px; }
-  #card-edit-modal textarea{ min-height:64px; }
-  #card-edit-modal .ce-actions{ display:flex; gap:10px; margin-top:20px; align-items:center; }
+  #card-edit-modal textarea, #card-add-modal textarea{ min-height:64px; }
+  #card-edit-modal .ce-actions, #card-add-modal .ce-actions{ display:flex; gap:10px; margin-top:20px; align-items:center; flex-wrap:wrap; }
   #card-edit-modal .ce-actions .card-tool{ margin-inline-start:auto; }
-  #card-edit-modal .hint{ margin-top:10px; }
+  #card-edit-modal .hint, #card-add-modal .hint{ margin-top:10px; }
+  .ca-loc{ font-family:var(--serif); font-size:16px; color:var(--ink); background:var(--surface-2); border:1px solid var(--line); border-radius:var(--radius); padding:8px 12px; }
+  .btn-manual-add{ margin-top:8px; }
 
   .doc-mini input[type=file]{ display:none; }
   .doc-drop{ border: 1.5px dashed var(--line-strong); border-radius: var(--radius); padding: 18px 10px; text-align:center; color: var(--ink-soft); font-size: 12.5px; cursor:pointer; background: var(--surface-2); transition: all .18s var(--ease); }
@@ -556,6 +558,7 @@
         </div>
 
         <button class="btn full" id="btn-picker-add">הוסף לחזרה</button>
+        <button class="btn small ghost full btn-manual-add" id="btn-manual-add">✎ כתוב שאלה בעצמי</button>
       </div>
 
       <div class="loading" id="new-loading" style="display:none;">מעבד...</div>
@@ -597,6 +600,7 @@
           <span class="f-meta" id="detail-count"></span>
         </div>
         <button class="btn full" id="btn-start-review">בדוק אותי על זה ⟵</button>
+        <button class="btn small ghost full btn-manual-add" id="btn-folder-manual-add">✎ הוסף שאלה משלך לכאן</button>
         <div class="lib-list" id="detail-lib-list" style="margin-top:14px; max-height:none;"></div>
       </div>
 
@@ -618,7 +622,7 @@
 
       <div id="active-review" style="display:none;">
         <div id="session-done" style="display:none;">
-          <div class="hint" style="margin-bottom:12px;">סיימת את הזמן שקבעת 👏</div>
+          <div class="hint" id="session-done-msg" style="margin-bottom:12px;">סיימת את הזמן שקבעת 👏</div>
           <div class="actions-row">
             <button class="btn" id="btn-session-continue">להמשיך עוד קצת</button>
             <button class="btn secondary" id="btn-session-folders">↩ לתיקיות</button>
@@ -810,6 +814,23 @@
   </div>
 </div>
 
+<div class="modal-overlay" id="card-add-modal">
+  <div class="modal">
+    <button class="modal-close" id="btn-close-card-add">✕</button>
+    <h3>שאלה משלך</h3>
+    <label class="field-label">מיקום</label><div class="ca-loc" id="ca-loc"></div>
+    <label class="field-label">נושא (לא חובה)</label><input type="text" id="ca-topic" autocomplete="off">
+    <label class="field-label">שאלה</label><textarea id="ca-question"></textarea>
+    <label class="field-label">תשובה</label><textarea id="ca-answer"></textarea>
+    <div class="hint" id="ca-hint"></div>
+    <div class="ce-actions">
+      <button class="btn" id="btn-ca-save">הוסף לחזרה</button>
+      <button class="btn secondary" id="btn-ca-more">הוסף ועוד שאלה</button>
+      <button class="btn ghost" id="btn-ca-cancel">ביטול</button>
+    </div>
+  </div>
+</div>
+
 <div class="toast" id="toast"></div>
 <script>
 const el = id => document.getElementById(id);
@@ -820,6 +841,8 @@ let activeFolder = null; // null = all material
 let pendingFolder = undefined; // folder chosen in folder-browser, awaiting time-picker
 let sessionLimit = null; // max cards for this review session, null = unlimited
 let sessionCount = 0; // cards completed so far this session
+let sessionSeen = new Set(); // cards already shown this session
+let sessionAuto = false; // "לפי האלגוריתם": the session ends when the due cards are done
 const CHECK_MODE_KEY = 'chazara_check_mode_v1';
 const THEME_KEY = 'chazara_theme_v1';
 const BG_KEY = 'chazara_bg_v1';
@@ -829,10 +852,12 @@ const PENDING_KEY = 'chazara_pending_v1';
 let transientOffline = false;
 const expandedGroups = new Set();
 // bump on every change to the file, so it's clear which copy is in use
-const APP_VERSION = '4.0';
+const APP_VERSION = '4.3';
 // Where updates are published (version.json + chazara.html). Empty = updates are off.
 // The launcher (app\launch.vbs) reads this same line, so it is the only place to set it.
 const UPDATE_BASE_URL = 'https://raw.githubusercontent.com/tochnatorati-lab/kinyan-torati/main/';
+// 'netfree' edition: texts only from Otzaria, Sefaria is never contacted; it updates from its own folder (netfree/)
+const EDITION = 'regular';
 const CARDS_KEY = 'chazara_cards_v3';
 const KEY_KEY = 'chazara_api_key_gemini_v1';
 const REVIEW_MODE_KEY = 'chazara_review_mode_v1';
@@ -1113,14 +1138,191 @@ async function fetchSourceText(techRef){
     for(const r of techRef.split('|')){ const t = await fetchSourceText(r); if(t) parts.push(t); }
     const joined = parts.join('\n') || null; sourceTextCache.set(techRef, joined); return joined;
   }
+  const heText = await withOtzaria(() => fetchSefariaText(techRef), () => otzariaText(techRef));
+  sourceTextCache.set(techRef, heText);
+  return heText;
+}
+async function fetchSefariaText(techRef){
   const res = await fetch(`https://www.sefaria.org/api/texts/${encodeURIComponent(techRef)}?context=0&commentary=0`);
   if(!res.ok) return null;
   const data = await res.json();
   const heRaw = data.he;
-  let heText = Array.isArray(heRaw) ? heRaw.flat(Infinity).join(' ') : (heRaw || '');
-  heText = heText.replace(/<[^>]+>/g,'').trim() || null;
-  sourceTextCache.set(techRef, heText);
-  return heText;
+  const heText = Array.isArray(heRaw) ? heRaw.flat(Infinity).join(' ') : (heRaw || '');
+  return heText.replace(/<[^>]+>/g,'').trim() || null;
+}
+
+// ---------- Otzaria fallback: when Sefaria can't be reached (e.g. blocked by a filter like NetFree) ----------
+// Texts come from the open Otzaria library on GitHub (same host as app updates). A book that isn't there is skipped, never invented.
+const OTZARIA_BASE = 'https://raw.githubusercontent.com/Sivan22/otzaria-library/main/אוצריא/';
+const OTZ_DIRS = {"תנך/תורה":"בראשית|שמות|ויקרא|במדבר|דברים","תנך/ראשונים/רשי/תורה":"רשי על בראשית|רשי על שמות|רשי על ויקרא|רשי על במדבר|רשי על דברים","תנך/ראשונים/רמבן/תורה":"רמבן על בראשית|רמבן על שמות|רמבן על ויקרא|רמבן על במדבר|רמבן על דברים","תנך/ראשונים/אבן עזרא/תורה":"אבן עזרא על בראשית|אבן עזרא על שמות|אבן עזרא על ויקרא|אבן עזרא על במדבר|אבן עזרא על דברים","תנך/ראשונים/ספורנו/תורה":"ספורנו על בראשית|ספורנו על שמות|ספורנו על ויקרא|ספורנו על במדבר|ספורנו על דברים","תנך/ראשונים/רשבם/תורה":"רשבם על בראשית|רשבם על שמות|רשבם על ויקרא|רשבם על במדבר|רשבם על דברים","תנך/אחרונים/אור החיים/תורה":"אור החיים על בראשית|אור החיים על שמות|אור החיים על ויקרא|אור החיים על במדבר|אור החיים על דברים","תנך/אחרונים/כלי יקר/תורה":"כלי יקר על בראשית|כלי יקר על שמות|כלי יקר על ויקרא|כלי יקר על במדבר|כלי יקר על דברים","תנך/ראשונים/רדק/תורה":"רדק על בראשית","תנך/נביאים":"יהושע|שופטים|שמואל א|שמואל ב|מלכים א|מלכים ב|ישעיהו|ירמיהו|יחזקאל|הושע|יואל|עמוס|עובדיה|יונה|מיכה|נחום|חבקוק|צפניה|חגי|זכריה|מלאכי","תנך/ראשונים/רשי/נביאים":"רשי על יהושע|רשי על שופטים|רשי על שמואל א|רשי על שמואל ב|רשי על מלכים א|רשי על מלכים ב|רשי על ישעיהו|רשי על ירמיהו|רשי על יחזקאל|רשי על הושע|רשי על יואל|רשי על עמוס|רשי על עובדיה|רשי על יונה|רשי על מיכה|רשי על נחום|רשי על חבקוק|רשי על צפניה|רשי על חגי|רשי על זכריה|רשי על מלאכי","תנך/ראשונים/רדק/נביאים":"רדק על יהושע|רדק על שופטים|רדק על שמואל א|רדק על שמואל ב|רדק על מלכים א=רדק על מלכים א׳|רדק על מלכים ב|רדק על יחזקאל|רדק על הושע|רדק על יואל|רדק על עמוס|רדק על עובדיה|רדק על יונה|רדק על מיכה|רדק על נחום|רדק על חבקוק|רדק על צפניה|רדק על חגי|רדק על זכריה|רדק על מלאכי","תנך/אחרונים/מצודת דוד/נביאים":"מצודת דוד על יהושע|מצודת דוד על שופטים|מצודת דוד על שמואל א|מצודת דוד על שמואל ב|מצודת דוד על מלכים א|מצודת דוד על מלכים ב|מצודת דוד על ישעיהו|מצודת דוד על ירמיהו|מצודת דוד על יחזקאל|מצודת דוד על הושע|מצודת דוד על יואל|מצודת דוד על עמוס|מצודת דוד על עובדיה|מצודת דוד על יונה|מצודת דוד על מיכה|מצודת דוד על נחום|מצודת דוד על חבקוק|מצודת דוד על צפניה|מצודת דוד על חגי|מצודת דוד על זכריה|מצודת דוד על מלאכי","תנך/ראשונים/אבן עזרא/נביאים":"אבן עזרא על ישעיהו|אבן עזרא על הושע|אבן עזרא על יואל|אבן עזרא על עמוס|אבן עזרא על עובדיה|אבן עזרא על יונה|אבן עזרא על מיכה|אבן עזרא על נחום|אבן עזרא על חבקוק|אבן עזרא על צפניה|אבן עזרא על חגי|אבן עזרא על זכריה|אבן עזרא על מלאכי","תנך/כתובים":"תהילים|משלי|איוב|שיר השירים|רות|איכה|קהלת|אסתר|דניאל|עזרא|נחמיה|דברי הימים א|דברי הימים ב","תנך/ראשונים/רשי/כתובים":"רשי על תהילים|רשי על משלי|רשי על איוב|רשי על שיר השירים|רשי על רות|רשי על איכה|רשי על קהלת|רשי על אסתר|רשי על דניאל|רשי על עזרא|רשי על נחמיה|רשי על דברי הימים א|רשי על דברי הימים ב","תנך/ראשונים/אבן עזרא/כתובים":"אבן עזרא על תהילים|אבן עזרא על משלי|אבן עזרא על איוב|אבן עזרא על שיר השירים|אבן עזרא על רות|אבן עזרא על איכה|אבן עזרא על קהלת|אבן עזרא על אסתר|אבן עזרא על דניאל|אבן עזרא על עזרא|אבן עזרא על נחמיה","תנך/ראשונים/רדק/כתובים":"רדק על תהילים|רדק על דברי הימים א=רדק על דברי הימים א׳|רדק על דברי הימים ב","תנך/אחרונים/מצודת דוד/כתובים":"מצודת דוד על תהילים|מצודת דוד על משלי|מצודת דוד על איוב|מצודת דוד על שיר השירים|מצודת דוד על קהלת|מצודת דוד על דניאל|מצודת דוד על עזרא|מצודת דוד על נחמיה|מצודת דוד על דברי הימים א|מצודת דוד על דברי הימים ב","תנך/ראשונים/ספורנו/כתובים":"ספורנו על שיר השירים","תלמוד בבלי/סדר זרעים":"ברכות","תלמוד בבלי/ראשונים/רשי/סדר זרעים":"רשי על ברכות","תלמוד בבלי/ראשונים/תוספות/סדר זרעים":"תוספות על ברכות","תלמוד בבלי/ראשונים/רמבן/סדר זרעים":"חידושי רמבן על ברכות","תלמוד בבלי/ראשונים/רשבא/סדר זרעים":"רשבא על ברכות","תלמוד בבלי/ראשונים/ריטבא/סדר זרעים":"ריטבא על ברכות","תלמוד בבלי/ראשונים/מאירי/סדר זרעים":"מאירי על ברכות","תלמוד בבלי/סדר מועד":"שבת|עירובין|פסחים|יומא|סוכה|ביצה|ראש השנה|תענית|מגילה|מועד קטן|חגיגה","תלמוד בבלי/ראשונים/רשי/סדר מועד":"רשי על שבת|רשי על עירובין|רשי על פסחים|רשי על יומא|רשי על סוכה|רשי על ביצה|רשי על ראש השנה|רשי על תענית|רשי על מגילה|רשי על מועד קטן|רשי על חגיגה","תלמוד בבלי/ראשונים/תוספות/סדר מועד":"תוספות על שבת|תוספות על עירובין|תוספות על פסחים|תוספות על יומא|תוספות על סוכה|תוספות על ביצה|תוספות על ראש השנה|תוספות על תענית|תוספות על מגילה|תוספות על מועד קטן|תוספות על חגיגה","תלמוד בבלי/ראשונים/רמבן/סדר מועד":"חידושי רמבן על שבת|חידושי רמבן על עירובין|חידושי רמבן על פסחים|חידושי רמבן על יומא|חידושי רמבן על סוכה|חידושי רמבן על ביצה|חידושי רמבן על ראש השנה|חידושי רמבן על תענית|חידושי רמבן על מגילה|חידושי רמבן על מועד קטן|חידושי רמבן על חגיגה","תלמוד בבלי/ראשונים/רשבא/סדר מועד":"רשבא על שבת|רשבא על עירובין|רשבא על ביצה|רשבא על ראש השנה|רשבא על מגילה","תלמוד בבלי/ראשונים/מאירי/סדר מועד":"מאירי על שבת|מאירי על עירובין|מאירי על פסחים|מאירי על יומא|מאירי על סוכה|מאירי על ביצה|מאירי על ראש השנה|מאירי על תענית|מאירי על מגילה|מאירי על מועד קטן|מאירי על חגיגה","תלמוד בבלי/ראשונים/ריטבא/סדר מועד":"ריטבא על עירובין|ריטבא על פסחים|ריטבא על יומא|ריטבא על סוכה|ריטבא על ראש השנה|ריטבא על תענית|ריטבא על מגילה|ריטבא על מועד קטן","תלמוד בבלי/סדר נשים":"יבמות|כתובות|נדרים|נזיר|סוטה|גיטין|קידושין","תלמוד בבלי/ראשונים/רשי/סדר נשים":"רשי על יבמות|רשי על כתובות|רשי על נדרים|רשי על נזיר|רשי על סוטה|רשי על גיטין|רשי על קידושין","תלמוד בבלי/ראשונים/תוספות/סדר נשים":"תוספות על יבמות|תוספות על כתובות|תוספות על נדרים|תוספות על נזיר|תוספות על סוטה|תוספות על גיטין|תוספות על קידושין","תלמוד בבלי/ראשונים/רמבן/סדר נשים":"חידושי רמבן על יבמות|חידושי רמבן על כתובות|חידושי רמבן על נזיר|חידושי רמבן על סוטה|חידושי רמבן על גיטין|חידושי רמבן על קידושין","תלמוד בבלי/ראשונים/רשבא/סדר נשים":"רשבא על יבמות|רשבא על כתובות|רשבא על נדרים|רשבא על גיטין|רשבא על קידושין","תלמוד בבלי/ראשונים/ריטבא/סדר נשים":"ריטבא על יבמות|ריטבא על כתובות|ריטבא על נדרים|ריטבא על קידושין","תלמוד בבלי/ראשונים/מאירי/סדר נשים":"מאירי על יבמות|מאירי על כתובות|מאירי על נדרים|מאירי על נזיר|מאירי על סוטה|מאירי על גיטין|מאירי על קידושין","תלמוד בבלי/סדר נזיקין":"בבא קמא|בבא מציעא|בבא בתרא|סנהדרין|מכות|שבועות|עבודה זרה|הוריות","תלמוד בבלי/ראשונים/רשי/סדר נזיקין":"רשי על בבא קמא|רשי על בבא מציעא|רשי על בבא בתרא|רשי על סנהדרין|רשי על מכות|רשי על שבועות|רשי על עבודה זרה|רשי על הוריות","תלמוד בבלי/ראשונים/תוספות/סדר נזיקין":"תוספות על בבא קמא|תוספות על בבא מציעא|תוספות על בבא בתרא|תוספות על סנהדרין|תוספות על מכות|תוספות על שבועות|תוספות על עבודה זרה|תוספות על הוריות","תלמוד בבלי/ראשונים/רשבא/סדר נזיקין":"רשבא על בבא קמא|רשבא על בבא מציעא|רשבא על בבא בתרא|רשבא על שבועות|רשבא על עבודה זרה","תלמוד בבלי/ראשונים/מאירי/סדר נזיקין":"מאירי על בבא קמא|מאירי על בבא מציעא|מאירי על בבא בתרא|מאירי על סנהדרין|מאירי על מכות|מאירי על שבועות|מאירי על הוריות","תלמוד בבלי/ראשונים/רמבן/סדר נזיקין":"חידושי רמבן על בבא מציעא|חידושי רמבן על בבא בתרא|חידושי רמבן על סנהדרין|חידושי רמבן על מכות|חידושי רמבן על שבועות|חידושי רמבן על עבודה זרה","תלמוד בבלי/ראשונים/ריטבא/סדר נזיקין":"ריטבא על מכות|ריטבא על עבודה זרה","תלמוד בבלי/ראשונים/ריטבא/סדר קדשים":"ריטבא על שבועות|ריטבא על חולין","תלמוד בבלי/סדר קדשים":"זבחים|מנחות|חולין|בכורות|ערכין|תמורה|כריתות|מעילה","תלמוד בבלי/ראשונים/רשי/סדר קדשים":"רשי על זבחים|רשי על מנחות|רשי על חולין|רשי על בכורות|רשי על ערכין|רשי על תמורה|רשי על כריתות|רשי על מעילה","תלמוד בבלי/ראשונים/תוספות/סדר קדשים":"תוספות על זבחים|תוספות על מנחות|תוספות על חולין|תוספות על בכורות|תוספות על ערכין|תוספות על תמורה|תוספות על כריתות|תוספות על מעילה","תלמוד בבלי/ראשונים/רשבא/סדר קדשים":"רשבא על מנחות|רשבא על חולין","תלמוד בבלי/ראשונים/רמבן/סדר קדשים":"חידושי רמבן על חולין","תלמוד בבלי/ראשונים/מאירי/סדר קדשים":"מאירי על חולין","תלמוד בבלי/סדר טהרות":"נדה","תלמוד בבלי/ראשונים/רשי/סדר טהרות":"רשי על נדה","תלמוד בבלי/ראשונים/תוספות/סדר טהרות":"תוספות על נדה","תלמוד בבלי/ראשונים/רמבן/סדר טהרות":"חידושי רמבן על נדה","תלמוד בבלי/ראשונים/רשבא/סדר טהרות":"רשבא על נדה","תלמוד בבלי/ראשונים/ריטבא/סדר טהרות":"ריטבא על נדה","תלמוד בבלי/ראשונים/מאירי/סדר טהרות":"מאירי על נדה","משנה/סדר זרעים":"משנה ברכות","משנה/ראשונים/ברטנורא/סדר זרעים":"ברטנורא על משנה ברכות","משנה/אחרונים/תוספות יום טוב/סדר זרעים":"תוספות יום טוב על משנה ברכות","משנה/ראשונים/רמבם/סדר זרעים":"רמבם על משנה ברכות","משנה/סדר מועד":"משנה שבת|משנה עירובין|משנה פסחים|משנה יומא|משנה סוכה|משנה ביצה|משנה ראש השנה|משנה תענית|משנה מגילה|משנה מועד קטן|משנה חגיגה","משנה/ראשונים/ברטנורא/סדר מועד":"ברטנורא על משנה שבת|ברטנורא על משנה עירובין|ברטנורא על משנה פסחים|ברטנורא על משנה יומא|ברטנורא על משנה סוכה|ברטנורא על משנה ביצה|ברטנורא על משנה ראש השנה|ברטנורא על משנה תענית|ברטנורא על משנה מגילה|ברטנורא על משנה מועד קטן|ברטנורא על משנה חגיגה","משנה/אחרונים/תוספות יום טוב/סדר מועד":"תוספות יום טוב על משנה שבת|תוספות יום טוב על משנה עירובין|תוספות יום טוב על משנה פסחים|תוספות יום טוב על משנה יומא|תוספות יום טוב על משנה סוכה|תוספות יום טוב על משנה ביצה|תוספות יום טוב על משנה ראש השנה|תוספות יום טוב על משנה תענית|תוספות יום טוב על משנה מגילה|תוספות יום טוב על משנה מועד קטן|תוספות יום טוב על משנה חגיגה","משנה/ראשונים/רמבם/סדר מועד":"רמבם על משנה שבת|רמבם על משנה פסחים|רמבם על משנה ראש השנה|רמבם על משנה מגילה|רמבם על משנה מועד קטן","משנה/סדר נשים":"משנה יבמות|משנה כתובות|משנה נדרים|משנה נזיר|משנה סוטה|משנה גיטין|משנה קידושין","משנה/ראשונים/ברטנורא/סדר נשים":"ברטנורא על משנה יבמות|ברטנורא על משנה כתובות|ברטנורא על משנה נדרים|ברטנורא על משנה נזיר|ברטנורא על משנה סוטה|ברטנורא על משנה גיטין|ברטנורא על משנה קידושין","משנה/אחרונים/תוספות יום טוב/סדר נשים":"תוספות יום טוב על משנה יבמות|תוספות יום טוב על משנה כתובות|תוספות יום טוב על משנה נדרים|תוספות יום טוב על משנה נזיר|תוספות יום טוב על משנה סוטה|תוספות יום טוב על משנה גיטין|תוספות יום טוב על משנה קידושין","משנה/ראשונים/רמבם/סדר נשים":"רמבם על משנה יבמות|רמבם על משנה כתובות|רמבם על משנה נזיר|רמבם על משנה סוטה|רמבם על משנה גיטין|רמבם על משנה קידושין","משנה/סדר נזיקין":"משנה בבא קמא|משנה בבא מציעא|משנה בבא בתרא|משנה סנהדרין|משנה מכות|משנה שבועות|משנה עבודה זרה|משנה הוריות|משנה אבות","משנה/ראשונים/ברטנורא/סדר נזיקין":"ברטנורא על משנה בבא קמא|ברטנורא על משנה בבא מציעא|ברטנורא על משנה בבא בתרא|ברטנורא על משנה סנהדרין|ברטנורא על משנה מכות|ברטנורא על משנה שבועות|ברטנורא על משנה עבודה זרה|ברטנורא על משנה הוריות|ברטנורא על משנה אבות","משנה/אחרונים/תוספות יום טוב/סדר נזיקין":"תוספות יום טוב על משנה בבא קמא|תוספות יום טוב על משנה בבא מציעא|תוספות יום טוב על משנה בבא בתרא|תוספות יום טוב על משנה סנהדרין|תוספות יום טוב על משנה מכות|תוספות יום טוב על משנה שבועות|תוספות יום טוב על משנה עבודה זרה|תוספות יום טוב על משנה הוריות|תוספות יום טוב על משנה אבות","משנה/ראשונים/רמבם/סדר נזיקין":"רמבם על משנה בבא קמא|רמבם על משנה בבא מציעא|רמבם על משנה סנהדרין|רמבם על משנה מכות|רמבם על משנה שבועות|רמבם על משנה הוריות","משנה/סדר קדשים":"משנה זבחים|משנה מנחות|משנה חולין|משנה בכורות|משנה ערכין|משנה תמורה|משנה כריתות|משנה מעילה","משנה/ראשונים/ברטנורא/סדר קדשים":"ברטנורא על משנה זבחים|ברטנורא על משנה מנחות|ברטנורא על משנה חולין|ברטנורא על משנה בכורות|ברטנורא על משנה ערכין|ברטנורא על משנה תמורה|ברטנורא על משנה כריתות|ברטנורא על משנה מעילה","משנה/אחרונים/תוספות יום טוב/סדר קדשים":"תוספות יום טוב על משנה זבחים|תוספות יום טוב על משנה מנחות|תוספות יום טוב על משנה חולין|תוספות יום טוב על משנה בכורות|תוספות יום טוב על משנה ערכין|תוספות יום טוב על משנה תמורה|תוספות יום טוב על משנה כריתות|תוספות יום טוב על משנה מעילה","משנה/ראשונים/רמבם/סדר קדשים":"רמבם על משנה זבחים|רמבם על משנה מנחות|רמבם על משנה חולין|רמבם על משנה בכורות|רמבם על משנה ערכין|רמבם על משנה תמורה|רמבם על משנה כריתות|רמבם על משנה מעילה","משנה/סדר טהרות":"משנה נדה","משנה/ראשונים/ברטנורא/סדר טהרות":"ברטנורא על משנה נדה","משנה/אחרונים/תוספות יום טוב/סדר טהרות":"תוספות יום טוב על משנה נדה","משנה/ראשונים/רמבם/סדר טהרות":"רמבם על משנה נדה","הלכה/טור":"טור","הלכה/טור/מפרשים":"בית יוסף|בח","הלכה/שולחן ערוך/מפרשים/מגן אברהם":"מגן אברהם","הלכה/שולחן ערוך/מפרשים/משנה ברורה":"משנה ברורה|ביאור הלכה","הלכה":"ערוך השולחן","הלכה/שולחן ערוך":"שולחן ערוך, אורח חיים|שולחן ערוך, יורה דעה|שולחן ערוך, אבן העזר|שולחן ערוך, חושן משפט","הלכה/שולחן ערוך/מפרשים/טורי זהב":"טורי זהב על שולחן ערוך אורח חיים|טורי זהב על שולחן ערוך יורה דעה|טורי זהב על שולחן ערוך אבן העזר|טורי זהב על שולחן ערוך חושן משפט","הלכה/שולחן ערוך/מפרשים/באר היטב":"באר היטב אורח חיים|באר היטב יורה דעה|באר היטב אבן העזר|באר היטב חשן משפט","הלכה/שולחן ערוך/מפרשים/באר הגולה":"באר הגולה על שולחן ערוך אורח חיים|באר הגולה על שולחן ערוך יורה דעה|באר הגולה על שולחן ערוך אבן העזר|באר הגולה על שולחן ערוך חושן משפט","הלכה/שולחן ערוך/מפרשים/שפתי כהן":"שפתי כהן על שולחן ערוך יורה דעה|שפתי כהן על שולחן ערוך חושן משפט","הלכה/שולחן ערוך/מפרשים/פתחי תשובה":"פתחי תשובה על שולחן ערוך יורה דעה|פתחי תשובה על שולחן ערוך אבן העזר|פתחי תשובה על שולחן ערוך חושן משפט","הלכה/משנה תורה/ספר מדע":"משנה תורה, הלכות דעות|משנה תורה, הלכות תלמוד תורה|משנה תורה, הלכות עבודה זרה וחוקות הגויים|משנה תורה, הלכות תשובה","הלכה/משנה תורה/מפרשים/כסף משנה/ספר מדע":"כסף משנה על משנה תורה, הלכות דעות|כסף משנה על משנה תורה, הלכות תלמוד תורה|כסף משנה על משנה תורה, הלכות עבודה זרה וחוקות הגויים|כסף משנה על משנה תורה, הלכות תשובה","הלכה/משנה תורה/מפרשים/לחם משנה/ספר מדע":"לחם משנה על משנה תורה, הלכות דעות|לחם משנה על משנה תורה, הלכות תלמוד תורה|לחם משנה על משנה תורה, הלכות עבודה זרה וחוקות הגויים|לחם משנה על משנה תורה, הלכות תשובה","הלכה/משנה תורה/מפרשים/השגות הראבד/ספר מדע":"השגות הראבד על משנה תורה, הלכות דעות|השגות הראבד על משנה תורה, הלכות תלמוד תורה|השגות הראבד על משנה תורה, הלכות עבודה זרה וחוקות הגויים|השגות הראבד על משנה תורה, הלכות תשובה","הלכה/משנה תורה/ספר אהבה":"משנה תורה, הלכות קריאת שמע|משנה תורה, הלכות תפילה וברכת כהנים|משנה תורה, הלכות ציצית|משנה תורה, הלכות ברכות","הלכה/משנה תורה/מפרשים/כסף משנה/ספר אהבה":"כסף משנה על משנה תורה, הלכות קריאת שמע|כסף משנה על משנה תורה, הלכות תפילה וברכת כהנים|כסף משנה על משנה תורה, הלכות ציצית|כסף משנה על משנה תורה, הלכות ברכות","הלכה/משנה תורה/מפרשים/לחם משנה/ספר אהבה":"לחם משנה על משנה תורה, הלכות קריאת שמע|לחם משנה על משנה תורה, הלכות תפילה וברכת כהנים|לחם משנה על משנה תורה, הלכות ברכות","הלכה/משנה תורה/מפרשים/השגות הראבד/ספר אהבה":"השגות הראבד על משנה תורה, הלכות קריאת שמע|השגות הראבד על משנה תורה, הלכות תפילה וברכת כהנים|השגות הראבד על משנה תורה, הלכות ציצית|השגות הראבד על משנה תורה, הלכות ברכות","הלכה/משנה תורה/ספר זמנים":"משנה תורה, הלכות שבת|משנה תורה, הלכות עירובין|משנה תורה, הלכות שביתת יום טוב|משנה תורה, הלכות חמץ ומצה|משנה תורה, הלכות שופר וסוכה ולולב|משנה תורה, הלכות תעניות|משנה תורה, הלכות מגילה וחנוכה","הלכה/משנה תורה/מפרשים/כסף משנה/ספר זמנים":"כסף משנה על משנה תורה, הלכות שבת|כסף משנה על משנה תורה, הלכות עירובין|כסף משנה על משנה תורה, הלכות שביתת יום טוב|כסף משנה על משנה תורה, הלכות חמץ ומצה|כסף משנה על משנה תורה, הלכות שופר וסוכה ולולב|כסף משנה על משנה תורה, הלכות תעניות|כסף משנה על משנה תורה, הלכות מגילה וחנוכה","הלכה/משנה תורה/מפרשים/מגיד משנה/ספר זמנים":"מגיד משנה על משנה תורה, הלכות שבת|מגיד משנה על משנה תורה, הלכות עירובין|מגיד משנה על משנה תורה, הלכות שביתת יום טוב|מגיד משנה על משנה תורה, הלכות חמץ ומצה|מגיד משנה על משנה תורה, הלכות שופר וסוכה ולולב|מגיד משנה על משנה תורה, הלכות תעניות|מגיד משנה על משנה תורה, הלכות מגילה וחנוכה","הלכה/משנה תורה/מפרשים/לחם משנה/ספר זמנים":"לחם משנה על משנה תורה, הלכות שבת|לחם משנה על משנה תורה, הלכות עירובין|לחם משנה על משנה תורה, הלכות שביתת יום טוב|לחם משנה על משנה תורה, הלכות חמץ ומצה|לחם משנה על משנה תורה, הלכות שופר וסוכה ולולב|לחם משנה על משנה תורה, הלכות תעניות|לחם משנה על משנה תורה, הלכות מגילה וחנוכה","הלכה/משנה תורה/מפרשים/השגות הראבד/ספר זמנים":"השגות הראבד על משנה תורה, הלכות שבת|השגות הראבד על משנה תורה, הלכות עירובין|השגות הראבד על משנה תורה, הלכות שביתת יום טוב|השגות הראבד על משנה תורה, הלכות חמץ ומצה|השגות הראבד על משנה תורה, הלכות שופר וסוכה ולולב|השגות הראבד על משנה תורה, הלכות תעניות|השגות הראבד על משנה תורה, הלכות מגילה וחנוכה","הלכה/משנה תורה/ספר נשים":"משנה תורה, הלכות אישות|משנה תורה, הלכות גירושין","הלכה/משנה תורה/מפרשים/כסף משנה/ספר נשים":"כסף משנה על משנה תורה, הלכות אישות|כסף משנה על משנה תורה, הלכות גירושין","הלכה/משנה תורה/מפרשים/מגיד משנה/ספר נשים":"מגיד משנה על משנה תורה, הלכות אישות|מגיד משנה על משנה תורה, הלכות גירושין","הלכה/משנה תורה/מפרשים/לחם משנה/ספר נשים":"לחם משנה על משנה תורה, הלכות אישות|לחם משנה על משנה תורה, הלכות גירושין","הלכה/משנה תורה/מפרשים/השגות הראבד/ספר נשים":"השגות הראבד על משנה תורה, הלכות אישות|השגות הראבד על משנה תורה, הלכות גירושין","הלכה/משנה תורה/ספר קדושה":"משנה תורה, הלכות מאכלות אסורות|משנה תורה, הלכות שחיטה","הלכה/משנה תורה/מפרשים/כסף משנה/ספר קדושה":"כסף משנה על משנה תורה, הלכות מאכלות אסורות|כסף משנה על משנה תורה, הלכות שחיטה","הלכה/משנה תורה/מפרשים/מגיד משנה/ספר קדושה":"מגיד משנה על משנה תורה, הלכות מאכלות אסורות|מגיד משנה על משנה תורה, הלכות שחיטה","הלכה/משנה תורה/מפרשים/לחם משנה/ספר קדושה":"לחם משנה על משנה תורה, הלכות מאכלות אסורות|לחם משנה על משנה תורה, הלכות שחיטה","הלכה/משנה תורה/מפרשים/השגות הראבד/ספר קדושה":"השגות הראבד על משנה תורה, הלכות מאכלות אסורות|השגות הראבד על משנה תורה, הלכות שחיטה","הלכה/משנה תורה/ספר שופטים":"משנה תורה, הלכות מלכים ומלחמות","הלכה/משנה תורה/מפרשים/כסף משנה/ספר שופטים":"כסף משנה על משנה תורה, הלכות מלכים ומלחמות","הלכה/משנה תורה/מפרשים/לחם משנה/ספר שופטים":"לחם משנה על משנה תורה, הלכות מלכים ומלחמות","הלכה/משנה תורה/מפרשים/השגות הראבד/ספר שופטים":"השגות הראבד על משנה תורה, הלכות מלכים ומלחמות"};
+const OTZ_INDEX = (() => {
+  const m = new Map();
+  Object.entries(OTZ_DIRS).forEach(([d, list]) => list.split('|').forEach(x => { const [k, real] = x.split('='); m.set(k, d + '/' + (real || k) + '.txt'); }));
+  return m;
+})();
+let sefariaBlocked = EDITION === 'netfree'; // set once Sefaria fails while Otzaria answers; later requests go straight to Otzaria
+const OTZ_COMM = { 'Rashi':'רשי', 'Ramban':'רמבן', 'Ibn Ezra':'אבן עזרא', 'Sforno':'ספורנו', 'Rashbam':'רשבם', 'Or HaChaim':'אור החיים', 'Kli Yakar':'כלי יקר', 'Radak':'רדק', 'Metzudat David':'מצודת דוד',
+  'Tosafot':'תוספות', 'Chiddushei Ramban':'חידושי רמבן', 'Rashba':'רשבא', 'Ritva':'ריטבא', 'Meiri':'מאירי',
+  'Bartenura':'ברטנורא', 'Tosafot Yom Tov':'תוספות יום טוב', 'Rambam':'רמבם',
+  'Kessef Mishneh':'כסף משנה', 'Maggid Mishneh':'מגיד משנה', 'Lechem Mishneh':'לחם משנה', 'Hasagot HaRaavad':'השגות הראבד' };
+const OTZ_SA_COMM = { 'Turei Zahav':'טורי זהב על שולחן ערוך ', "Ba'er Hetev":'באר היטב ', 'Siftei Kohen':'שפתי כהן על שולחן ערוך ', 'Pitchei Teshuva':'פתחי תשובה על שולחן ערוך ', "Be'er HaGolah":'באר הגולה על שולחן ערוך ' };
+const OTZ_ALIAS = { 'תהלים':'תהילים', 'הלכות עבודה זרה':'הלכות עבודה זרה וחוקות הגויים', 'הלכות תפילה':'הלכות תפילה וברכת כהנים', 'הלכות יום טוב':'הלכות שביתת יום טוב' };
+function otzNum(n){ return toHebrewNumeral(n).replace(/[׳״'"]/g, ''); }
+function otzNorm(s){ return String(s).replace(/<[^>]+>/g, '').replace(/[׳״'"״׳\s]/g, ''); }
+function heNumVal(s){
+  const v = { 'א':1,'ב':2,'ג':3,'ד':4,'ה':5,'ו':6,'ז':7,'ח':8,'ט':9,'י':10,'כ':20,'ך':20,'ל':30,'מ':40,'ם':40,'נ':50,'ן':50,'ס':60,'ע':70,'פ':80,'ף':80,'צ':90,'ץ':90,'ק':100,'ר':200,'ש':300,'ת':400 };
+  let n = 0; for(const ch of String(s)) if(v[ch]) n += v[ch];
+  return n;
+}
+function otzSecLabel(sec){
+  const m = String(sec).match(/^(\d+)([ab])$/);
+  return m ? `דף ${otzNum(Number(m[1]))}${m[2] === 'a' ? '.' : ':'}` : null;
+}
+// Sefaria-style title -> { name: Otzaria file, path: heading labels before the section, secWord: 'פרק' / 'סימן' / null for a daf }
+function otzBook(title){
+  title = String(title).trim();
+  const secHe = en => { const k = Object.keys(SA_SECTIONS).find(k => SA_SECTIONS[k].en === en || TUR_SECTIONS[k].en === en); return k ? SA_SECTIONS[k].he : null; };
+  const t = TANAKH_BOOKS.find(b => b[1] === title); if(t) return { name: OTZ_ALIAS[t[0]] || t[0], path: [], secWord: 'פרק' };
+  const g = TRACTATES.find(b => b[1] === title); if(g) return { name: g[0], path: [], secWord: null };
+  let m = title.match(/^Mishnah (.+)$/);
+  if(m){ const x = MISHNAH_TRACTATES.find(b => b[1] === m[1]); if(x) return { name: 'משנה ' + x[0], path: [], secWord: 'פרק' }; }
+  if((m = title.match(/^Mishneh Torah, (.+)$/))){ const x = RAMBAM_HILCHOT.find(b => b[1] === m[1]); if(x) return { name: 'משנה תורה, ' + (OTZ_ALIAS[x[0]] || x[0]), path: [], secWord: 'פרק' }; }
+  if((m = title.match(/^Shulchan Arukh, (.+)$/)) && secHe(m[1])) return { name: 'שולחן ערוך, ' + secHe(m[1]), path: [], secWord: 'סימן' };
+  if((m = title.match(/^(?:(Beit Yosef|Bach), )?Tur, (.+)$/)) && secHe(m[2])) return { name: m[1] === 'Beit Yosef' ? 'בית יוסף' : m[1] === 'Bach' ? 'בח' : 'טור', path: [secHe(m[2])], secWord: 'סימן' };
+  if((m = title.match(/^Aruch Hashulchan, (.+)$/)) && secHe(m[1])) return { name: 'ערוך השולחן', path: [secHe(m[1])], secWord: 'סימן' };
+  if(title === 'Magen Avraham') return { name: 'מגן אברהם', path: [], secWord: 'סימן' };
+  if(title === 'Mishnah Berurah') return { name: 'משנה ברורה', path: [], secWord: 'סימן' };
+  if(title === 'Biur Halacha') return { name: 'ביאור הלכה', path: [], secWord: 'סימן' };
+  if((m = title.match(/^(.+?) on Shulchan Arukh, (.+)$/)) && OTZ_SA_COMM[m[1]] && secHe(m[2])){
+    let name = OTZ_SA_COMM[m[1]] + secHe(m[2]);
+    if(!OTZ_INDEX.has(name) && m[1] === "Ba'er Hetev") name = name.replace('חושן', 'חשן');
+    return { name, path: [], secWord: 'סימן' };
+  }
+  if((m = title.match(/^(.+?) on (.+)$/)) && OTZ_COMM[m[1]]){
+    const base = otzBook(m[2]); if(base) return { name: `${OTZ_COMM[m[1]]} על ${base.name}`, path: base.path, secWord: base.secWord };
+  }
+  return null;
+}
+const otzFiles = new Map(); // path -> Promise of parsed file; only the last few are kept in memory
+async function otzLoad(name){
+  const path = OTZ_INDEX.get(name);
+  if(!path) return null;
+  if(!otzFiles.has(path)){
+    otzFiles.set(path, (async () => {
+      const url = OTZARIA_BASE + path.split('/').map(encodeURIComponent).join('/');
+      let res = null, cache = null;
+      try{ if(window.caches){ cache = await caches.open('otzaria-v1'); res = await cache.match(url); } }catch(e){ cache = null; }
+      if(!res){
+        res = await fetch(url);
+        if(!res.ok) return null;
+        try{ if(cache) await cache.put(url, res.clone()); }catch(e){}
+      }
+      const lines = (await res.text()).split(/\r?\n/);
+      const heads = [];
+      lines.forEach((l, i) => { const h = l.match(/^\s*<h(\d)>(.*?)<\/h\1>\s*$/); if(h) heads.push({ i, level: Number(h[1]), text: otzNorm(h[2]) }); });
+      return { lines, heads };
+    })());
+    otzFiles.get(path).catch(() => {}).then(f => { if(!f) otzFiles.delete(path); });
+    if(otzFiles.size > 4) otzFiles.delete(otzFiles.keys().next().value);
+  }
+  return otzFiles.get(path);
+}
+// line range of a section found by its heading labels in order, e.g. ['אורח חיים', 'סימן א']
+function otzFind(file, labels){
+  let from = 0, to = file.lines.length, level = 0;
+  for(const label of labels){
+    const want = otzNorm(label);
+    const h = file.heads.find(x => x.i >= from && x.i < to && x.level > level && x.text === want);
+    if(!h) return null;
+    const next = file.heads.find(x => x.i > h.i && x.i < to && x.level <= h.level);
+    from = h.i + 1; to = next ? next.i : to; level = h.level;
+  }
+  return { from, to, level };
+}
+function otzClean(s){
+  return String(s).replace(/<br\s*\/?>/gi, ' ').replace(/<[^>]+>/g, '').replace(/&thinsp;|&nbsp;/g, ' ').replace(/&quot;/g, '"').replace(/&amp;/g, '&').replace(/\s+/g, ' ').trim();
+}
+// text of a section; segs (a Set of numbers) keeps only those pesukim / mishnayot / halachot / seifim / se'ifim katanim
+function otzSectionText(file, range, segs){
+  const parts = []; let cur = null;
+  const subs = file.heads.filter(x => x.i >= range.from && x.i < range.to && x.level > range.level);
+  const byHead = segs && subs.length && subs.some(x => /^(פסוק|משנה|הלכה|סעיף|סעיףקטן)/.test(x.text));
+  for(let i = range.from; i < range.to; i++){
+    const line = file.lines[i];
+    const h = subs.find(x => x.i === i);
+    if(h){ if(byHead){ const m = h.text.match(/^(?:פסוק|משנה|הלכה|סעיףקטן|סעיף)(.+)$/); cur = m ? heNumVal(m[1]) : cur; } continue; }
+    if(segs && !byHead){ const k = otzMarker(line); if(k) cur = k; }
+    if(segs && !segs.has(cur)) continue;
+    const t = otzClean(line); if(t) parts.push(t);
+  }
+  return parts.join('\n') || null;
+}
+function otzMarker(line){ const m = String(line).replace(/^\s*<b>.*?<\/b>\s*(?:<br\s*\/?>)?/, '').match(/^\s*\(([\u05D0-\u05EA]{1,4})\)/); return m ? heNumVal(m[1]) : null; }
+function otzSegSet(a, b){ if(!a) return null; const s = new Set(); for(let k = a; k <= (b || a); k++) s.add(k); return s; }
+// techRef like "Rashi on Genesis.1.5", "Berakhot.2a", "Shulchan Arukh, Orach Chayim.1.3-5" or a range card's "Berakhot 2a"
+async function otzariaText(techRef, segs){
+  const m = String(techRef).match(/^(.*?)[. ](\d+[ab]?)(?:[.:](\d+)(?:-(\d+))?)?$/);
+  if(!m) return null;
+  const book = otzBook(m[1]); if(!book) return null;
+  const file = await otzLoad(book.name); if(!file) return null;
+  const secLabel = book.secWord ? `${book.secWord} ${otzNum(Number(m[2]))}` : otzSecLabel(m[2]);
+  if(!secLabel) return null;
+  const range = otzFind(file, [...book.path, secLabel]); if(!range) return null;
+  return otzSectionText(file, range, segs || otzSegSet(Number(m[3]) || 0, Number(m[4]) || 0));
+}
+// a whole span ("Genesis 1:1-6:8", "Rashi on Berakhot 2a-5b") split into chapters / amudim, like fetchSpanSections
+async function otzariaSpan(ref){
+  const m = String(ref).match(/^(.*) (\d+[ab]?)(?::(\d+))?-(\d+[ab]?)(?::(\d+))?$/);
+  if(!m) return null;
+  const book = otzBook(m[1]); if(!book) return null;
+  const file = await otzLoad(book.name); if(!file) return null;
+  const out = new Map();
+  for(let i = 0; i < 400; i++){
+    const sec = nextSection(m[2], i);
+    const label = book.secWord ? `${book.secWord} ${otzNum(Number(sec))}` : otzSecLabel(sec);
+    const range = label && otzFind(file, [...book.path, label]);
+    // verse limits only at the edges of a parasha (Tanakh); a Gemara perek is taken by whole amudim
+    let segs = null;
+    if(book.secWord && i === 0 && Number(m[3]) > 1) segs = otzSegSet(Number(m[3]), 999);
+    if(book.secWord && sec === m[4] && m[5]) segs = otzSegSet(segs ? Number(m[3]) : 1, Number(m[5]));
+    const t = range && otzSectionText(file, range, segs);
+    if(t) out.set(sec, t);
+    if(sec === m[4]) break;
+  }
+  return out.size ? out : null;
+}
+// seif-range commentaries without Sefaria's links: the Shulchan Aruch text in Otzaria marks where each se'if katan of
+// Taz / Magen Avraham / Ba'er Hetev / Be'er HaGolah attaches. Others (Mishnah Berurah etc.) have no marks and are skipped.
+const OTZ_MARK = { 'Turei Zahav':"Turei Zahav", "Ba'er Hetev":"Ba'er Hetev", 'Magen Avraham':'Magen Avraham', "Be'er HaGolah":"Be'er HaGolah", 'Siftei Kohen':'Siftei Kohen', 'Pitchei Teshuva':'Pitchei Teshuva' };
+async function otzariaLinked(source){
+  const v = source.viaLinks;
+  const who = Object.keys(OTZ_MARK).find(k => v.title.startsWith(k)); if(!who) return null;
+  const mb = v.base.match(/^(.*)\.(\d+)$/); if(!mb) return null;
+  const book = otzBook(mb[1]); if(!book) return null;
+  const file = await otzLoad(book.name); if(!file) return null;
+  const range = otzFind(file, [`סימן ${otzNum(Number(mb[2]))}`]); if(!range) return null;
+  const orders = new Set(); let cur = null;
+  const re = new RegExp(`data-commentator="${OTZ_MARK[who]}"[^>]*data-order="(\\d+)"`, 'g');
+  for(let i = range.from; i < range.to; i++){
+    const line = file.lines[i];
+    const k = otzMarker(line); if(k) cur = k;
+    if(cur < v.from || cur > v.to) continue;
+    let x; re.lastIndex = 0; while((x = re.exec(line))) orders.add(Number(x[1]));
+  }
+  if(!orders.size) return null;
+  return await otzariaText(source.techRef, orders);
+}
+// try Sefaria first (unless it was already found blocked), then Otzaria. A network failure of both is rethrown so the job waits in the queue.
+async function withOtzaria(fromSefaria, fromOtzaria){
+  let sefErr = null;
+  if(!sefariaBlocked){
+    try{ const r = await fromSefaria(); if(r) return r; }catch(e){ sefErr = e; }
+  }
+  try{
+    const r = await fromOtzaria();
+    if(sefErr) sefariaBlocked = true;
+    return r;
+  }catch(e){ if(sefErr) throw sefErr; return null; }
 }
 
 document.querySelectorAll('.num-in').forEach(inp=>{
@@ -1163,6 +1365,12 @@ function buildTurSources(){
 }
 // commentaries on a chosen seif range: resolved through Sefaria's links (their own numbering is not by seif)
 async function resolveLinkedSource(source){
+  const siman = source.techRef;
+  const text = await withOtzaria(() => resolveSefariaLinks(source), () => { source.techRef = siman; return otzariaLinked(source); });
+  if(!text) source.techRef = siman;
+  return text;
+}
+async function resolveSefariaLinks(source){
   const v = source.viaLinks, refs = [];
   for(let sf = v.from; sf <= v.to; sf++){
     const res = await fetch(`https://www.sefaria.org/api/links/${encodeURIComponent(v.base + '.' + sf)}?with_text=0`);
@@ -1224,6 +1432,28 @@ function newCardSkeleton(seferKey, folderLabel, meta){
 const HIGHLIGHT_INSTRUCTION = 'שדה highlight חייב להיות תקציר מאורגן ומפורט (3-5 משפטים) שמסביר את הנקודה בבהירות ובשלמות, עומד בפני עצמו ומבוסס על תוכן אמיתי — לא ציטוט מקוטע וולא משפט בודד שנשלף מהקשרו. שדה answer חייב להיות נוסח תשובה מוכנה וקצרה (1-3 משפטים) שעונה ישירות ובדיוק על ה-question, כך שאפשר להשוות אליה את מה שהלומד זוכר בלי לפתוח את המקור.';
 const MACHLOKET_INSTRUCTION = 'מחלוקות: אם במקור מופיעה מחלוקת מפורשת (בין תנאים/אמוראים/ראשונים/אחרונים/פוסקים), הוסף כרטיסייה נפרדת לכל מחלוקת עם "kind":"machloket", כשהשאלה בנוסח "במה נחלקו X ו-Y בענין Z?" והתשובה (answer) מפרטת את שתי השיטות והטעם של כל אחת. כרטיסייה רגילה: "kind":"regular". אל תמציא מחלוקת שאינה כתובה בטקסט.';
 const QUESTION_QUALITY = 'איכות השאלות היא העיקר: כל שאלה צריכה להיות מסכמת וממוקדת, ולתפוס את העיקר של הקטע (הדין או המסקנה, החידוש, הסברא המרכזית, או מהלך הסוגיה), כך שמי שיודע לענות עליה זוכר את הקטע. לא לשאול על פרט שולי, לא "מי אמר", לא על מספר או מילה בודדת, ולא שאלת כן/לא. השאלה צריכה למקד היטב את התשובה: תן בה את הרקע הדרוש בקצרה (על איזה מקרה, דין או קושיא מדובר), כך שברור בדיוק מה שואלים ויש רק תשובה אחת נכונה. השאלה לא תדרוש תשובה ארוכה או רשימה, אלא תכוון לנקודה אחת: דין, טעם, מסקנה או חידוש. למשל: "הגמרא מקשה שקריאת שמע של ערבית נאמרת לפני צאת הכוכבים. מה התירוץ?" ולא "מה נאמר בסוגיה?". התשובה (answer) קצרה ותכליתית, משפט אחד או שניים, בלי פירוט מיותר. כשמתאים, נסח כמו "מה המסקנה ומדוע?", "מה החידוש ב...?", "מה ההבדל בין... ל...?", "מהו מהלך הסוגיה ב...?". כשיש יותר מכרטיסייה אחת, כל אחת על נושא אחר, בלי חפיפה. כללי זיכרון (מחקר החזרה המרווחת, "20 הכללים" של וזניאק): (1) קודם הבנה: עדיף לשאול "למה" ו"מה הטעם" מאשר שינון גרידא; (2) מידע מינימלי: כל כרטיסייה בודקת רעיון אחד; (3) בלי רשימות: אם יש כמה דינים או שיטות, שאל על ההבדל או על העיקרון המאחד, לא "מנה את..."; (4) רמז הקשר: הרקע בשאלה מעגן את הזיכרון במקומו בסוגיה; (5) השאלה מחייבת שליפה מהזיכרון, ואי אפשר לנחש את התשובה מנוסח השאלה; (6) כשמתאים, חבר את הנקודה לדוגמה מוחשית כדי שתיקלט.';
+// variety: cards spread over the whole text, and nothing the learner already has is asked again
+const VARIETY_INSTRUCTION = 'גיוון: פזר את הכרטיסיות על פני כל הטקסט (תחילתו, אמצעו וסופו) ולא סביב נושא אחד. כל כרטיסייה, כולל ה-highlight שלה, עוסקת בנקודה אחרת ובקטע אחר של הטקסט. גוון גם בסוג השאלה: דין, טעם, חידוש, קושיא ותירוץ, הבדל בין מקרים.';
+const COMMENTARY_INSTRUCTION = 'זה מפרש: שאל על מה שהמפרש מחדש, מקשה או מסביר, ולא על התוכן הפשוט של המקור עצמו (עליו יש כרטיסיות נפרדות).';
+function coveredInstruction(existing){
+  const qs = existing.filter(c => c.question).slice(-15).map(c => '- ' + String(c.question).slice(0, 160));
+  return qs.length ? `כבר יש ללומד כרטיסיות על הנקודות האלה. אל תשאל עליהן שוב, גם לא בניסוח אחר, ובחר נקודות אחרות מהטקסט. אם לא נשארה נקודה מהותית חדשה, החזר [].\n${qs.join('\n')}` : '';
+}
+function cardWords(c){
+  return new Set(String((c.question || '') + ' ' + (c.answer || '')).replace(/[\u0591-\u05C7]/g, '').replace(/[^\u05D0-\u05EAa-zA-Z0-9\s]/g, ' ').split(/\s+/).filter(w => w.length > 1));
+}
+function similarCards(a, b){
+  const x = cardWords(a), y = cardWords(b);
+  if(!x.size || !y.size) return false;
+  let n = 0; x.forEach(w => { if(y.has(w)) n++; });
+  return n / (x.size + y.size - n) >= 0.5;
+}
+// drops new cards that ask nearly the same thing as an existing card or as an earlier new one
+function dropNearDuplicates(newCards, existing){
+  const kept = [];
+  newCards.forEach(c => { if(!existing.some(e => similarCards(c, e)) && !kept.some(k => similarCards(c, k))) kept.push(c); });
+  return kept;
+}
 // how many cards per unit (amud / seif / perek / source), from settings: few by default
 function maxCardsPerUnit(){ const n = cardsPerUnit(); return n === 'auto' ? 3 : n; }
 // question depth from settings: basic = the din / conclusion, advanced = reasoning and distinctions
@@ -1268,6 +1498,8 @@ async function generateCardsFromChunk(source, directText, partNote, seferKey, fo
   const system = `אתה עוזר ללומדי תורה לחזור על מה שלמדו. תקבל מקור תורני${partNote ? ' (חלק ממנו)' : ''}. צור ממנו כרטיסיות חזרה.
 ${countInstruction(partNote ? 'לחלק הזה' : (source.isBase ? 'למקור הזה' : 'לפרשן הזה'))}
 ${QUESTION_QUALITY} ${depthInstruction()}
+${VARIETY_INSTRUCTION}${source.isBase ? '' : ' ' + COMMENTARY_INSTRUCTION}
+${coveredInstruction(cards.filter(c => c.folderLabel === folderLabel || (c.sourceRef && c.sourceRef === source.heLabel)))}
 דיוק מיקום קריטי: בשדה topic בלבד ציין תמיד את המיקום המדויק באותיות עבריות (לעולם לא ספרות): "סעיף X" לשולחן ערוך/טור עצמם, "ס"ק X" (סעיף קטן) לנושאי כלים כמו ט"ז/מג"א/משנה ברורה/באר היטב. אם המקור הוא תוספות, רש"י או פרשן אחר עם כמה 'דיבורים המתחילים' (ד"ה) — זהה את הד"ה הספציפי של כל נקודה מתוך הטקסט עצמו וציין אותו במפורש (למשל: 'תוס׳ ד״ה ומאי טעמא'), וגם את הדף/מסכת. בשדה question אל תחזור שוב על המיקום/מראה המקום — הוא כבר מוצג מעל השאלה בממשק; התמקד רק בתוכן השאלה עצמו.
 ${HIGHLIGHT_INSTRUCTION}
 ${meta && meta.withMachloket ? MACHLOKET_INSTRUCTION : ''}
@@ -1309,7 +1541,8 @@ async function generateCardFromFreeText(text){
 }
 async function generateCardsFromDoc(text, filename){
   const excerpt = text.slice(0,12000);
-  const system = `אתה עוזר ללומדי תורה. תקבל טקסט מתוך מסמך. זהה 3 עד 6 נקודות מרכזיות בו, וצור עבור כל אחת כרטיסיית חזרה. מספרים (אם יש) יש לכתוב באותיות עבריות. ${QUESTION_QUALITY} ${depthInstruction()} ${HIGHLIGHT_INSTRUCTION}
+  const system = `אתה עוזר ללומדי תורה. תקבל טקסט מתוך מסמך. זהה 3 עד 6 נקודות מרכזיות בו, וצור עבור כל אחת כרטיסיית חזרה. מספרים (אם יש) יש לכתוב באותיות עבריות. ${QUESTION_QUALITY} ${depthInstruction()} ${VARIETY_INSTRUCTION} ${HIGHLIGHT_INSTRUCTION}
+${coveredInstruction(cards.filter(c => c.folderLabel === filename))}
 השב אך ורק ב-JSON כמערך: [{"topic": "...", "summary": "...", "question": "...", "answer": "...", "highlight": "..."}]`;
   const results = await askClaudeJson(system, excerpt);
   const arr = Array.isArray(results) ? results : [results];
@@ -1337,6 +1570,7 @@ el('tanakh-parasha').addEventListener('change', () => {
 function loadPerakimCache(){ try{ return JSON.parse(localStorage.getItem(PERAKIM_KEY) || '{}'); }catch(e){ return {}; } }
 async function getTalmudPerakim(en){
   const cache = loadPerakimCache(); if(cache[en]) return cache[en];
+  if(EDITION === 'netfree') return null;
   const res = await fetch(`https://www.sefaria.org/api/v2/raw/index/${encodeURIComponent(en)}`);
   if(!res.ok) return null;
   const data = await res.json();
@@ -1414,6 +1648,9 @@ function nextSection(start, i){
   return String(Number(start) + i);
 }
 async function fetchSpanSections(ref){
+  return await withOtzaria(() => fetchSefariaSpan(ref), () => otzariaSpan(ref));
+}
+async function fetchSefariaSpan(ref){
   const res = await fetch(`https://www.sefaria.org/api/texts/${encodeURIComponent(ref)}?context=0&commentary=0`);
   if(!res.ok) return null;
   const data = await res.json();
@@ -1436,6 +1673,8 @@ async function generateRangeSegmentCards(job, sec, label, baseText, comm){
   const system = `אתה עוזר ללומדי תורה לחזור על מה שלמדו. הלומד הוסיף לחזרה את ${job.folderLabel} כולו, ועכשיו אתה מקבל קטע אחד ממנו: ${label}${comm.length ? ', יחד עם המפרשים שבחר' : ''}. צור כרטיסיות חזרה לקטע הזה בלבד. המפרשים נכללים באותה כמות, לא בנוסף לה.
 ${countInstruction(unit)}
 ${QUESTION_QUALITY} ${depthInstruction()}
+${VARIETY_INSTRUCTION}
+${coveredInstruction(cards.filter(c => c.sourceRef === label))}
 מיקום: בשדה topic בלבד ציין מיקום מדויק באותיות עבריות (פסוקים, או דף ועמוד), ואם הנקודה מתוך מפרש, גם את שמו ואת הד"ה. בשדה question אל תחזור על המיקום, הוא מוצג מעל השאלה.
 אם יש בקטע מחלוקת מפורשת וחשובה, מותר שאחת הכרטיסיות תהיה עליה עם "kind":"machloket" ושאלה בנוסח "במה נחלקו X ו-Y בענין Z?". אל תמציא מחלוקת.
 ${HIGHLIGHT_INSTRUCTION}
@@ -1455,9 +1694,9 @@ ${HIGHLIGHT_INSTRUCTION}
 function rangeProgress(text){ el('new-loading').textContent = text; }
 async function runRangeJob(job){
   if(!getApiKey()) throw new Error('צריך להגדיר מפתח API בהגדרות קודם.');
-  rangeProgress(`מוריד את ${job.folderLabel} מספריא...`);
+  rangeProgress(`מוריד את ${job.folderLabel}${sefariaBlocked ? ' מאוצריא' : ''}...`);
   const base = await fetchSpanSections(job.spanRef);
-  if(!base || !base.size) throw new Error(`לא נמצא טקסט ב-Sefaria עבור ${job.folderLabel}`);
+  if(!base || !base.size) throw new Error(`לא נמצא טקסט (ספריא / אוצריא) עבור ${job.folderLabel}`);
   const comm = [];
   const maps = await Promise.all((job.commentaries || []).map(async c => {
     try{ return await fetchSpanSections(`${c.prefix} ${job.spanRef}`); }catch(e){ if(isNetworkError(e)) throw e; return null; }
@@ -1473,7 +1712,7 @@ async function runRangeJob(job){
     const sec = secs[i], label = rangeSegmentLabel(job, sec);
     rangeProgress(`יוצר כרטיסיות: ${label} (${doneIdx.size + 1} מתוך ${secs.length})...`);
     try{
-      const newCards = await generateRangeSegmentCards(job, sec, label, base.get(sec), comm);
+      const newCards = dropNearDuplicates(await generateRangeSegmentCards(job, sec, label, base.get(sec), comm), cards.filter(c => c.folderLabel === job.folderLabel || c.sourceRef === label));
       cards.push(...newCards); saveCards(); job.added = (job.added || 0) + newCards.length; fails = 0;
     }catch(e){
       if(isNetworkError(e) || ++fails >= 2) throw e; // two failures in a row = a real problem (key, quota); stop and keep the place
@@ -1509,6 +1748,7 @@ async function runJob(job){
     }
   } else if(job.kind === 'free'){ newCards = [await generateCardFromFreeText(job.text)]; }
   else if(job.kind === 'doc'){ newCards = await generateCardsFromDoc(job.text, job.filename); }
+  if(job.kind !== 'free') newCards = dropNearDuplicates(newCards, cards.filter(c => c.folderLabel === (job.folderLabel || job.filename)));
   cards.push(...newCards); saveCards(); refreshAllViews();
   return newCards.length;
 }
@@ -1549,7 +1789,7 @@ function updateNetStatus(){ const on = navigator.onLine, n = el('net-status'); n
 window.addEventListener('online', updateNetStatus); window.addEventListener('offline', updateNetStatus); updateNetStatus();
 window.addEventListener('online', processQueue);
 function showJobResult(res, label){
-  const skipNote = (!res.queued && skippedLabels.length) ? ` (לא נמצא טקסט ב-Sefaria עבור: ${[...new Set(skippedLabels)].join(', ')} — דולג)` : '';
+  const skipNote = (!res.queued && skippedLabels.length) ? ` (לא נמצא טקסט במקורות עבור: ${[...new Set(skippedLabels)].join(', ')} — דולג)` : '';
   const failNote = (!res.queued && failedLabels.length) ? ` לא הצלחתי ליצור כרטיסיות עבור: ${failedLabels.join(', ')}.` : '';
   el('new-confirm').textContent = res.queued
     ? (res.partial ? `נוספו ${res.partial} כרטיסיות ל"${label}". השאר ינותח אוטומטית כשתהיה רשת.` : `נשמר: "${label}" — ינותח אוטומטית כשתהיה רשת.`)
@@ -1617,7 +1857,7 @@ function libItemHtml(c){
       <button class="li-del" data-delete-id="${c.id}" title="מחיקת הכרטיסייה" aria-label="מחיקת הכרטיסייה">🗑</button>
       <div class="li-ref">${c.kind === 'machloket' ? '⚖ ' : ''}${escapeHtml(c.topic || c.sourceRef || '')}</div>
       ${c.sourceRef && c.sourceRef !== c.topic ? `<div class="li-source">${escapeHtml(c.sourceRef)}</div>` : ''}
-      <div class="li-stats">${c.reviewCount} חזרות · ✓${c.correctCount} ✗${c.incorrectCount}${c.userEdited ? ' · <span class="li-edited">נערך ידנית</span>' : ''}</div>
+      <div class="li-stats">${c.reviewCount} חזרות · ✓${c.correctCount} ✗${c.incorrectCount}${c.manual ? ' · <span class="li-edited">שאלה שלך</span>' : (c.userEdited ? ' · <span class="li-edited">נערך ידנית</span>' : '')}</div>
     </div>`;
 }
 function libDetailHtml(c){
@@ -1701,6 +1941,7 @@ function renderFolderDetail(label){
   const list = scopeCards(label).slice().sort(cardOrder);
   el('detail-scope-note').textContent = folderDisplayLabel(label);
   el('detail-count').textContent = `${list.length} כרטיסיות`;
+  el('btn-folder-manual-add').style.display = (label === null || label === undefined || String(label).startsWith('G::') || !list.length) ? 'none' : '';
   renderLibItemsInto('detail-lib-list', list);
 }
 function enterFolderDetail(label){
@@ -1808,6 +2049,54 @@ el('card-edit-modal').addEventListener('click', e => { if(e.target.id === 'card-
 document.querySelectorAll('[data-edit-current]').forEach(b => b.addEventListener('click', () => { if(currentCard) openCardEditor(currentCard.id); }));
 document.querySelectorAll('[data-delete-current]').forEach(b => b.addEventListener('click', () => { if(currentCard) deleteCard(currentCard.id); }));
 
+// ---------- Manual card: the learner writes the question and answer ----------
+// location comes from the "לימוד חדש" picker or from an open folder; the card is the learner's own, never shown as "מתוך" a source
+let addingLoc = null;
+function pickerLocation(){
+  const r = buildRangeJob();
+  if(r) return { seferKey:r.seferKey, folderLabel:r.folderLabel, groupLabel:r.groupLabel, sortKey:r.sortKey };
+  const b = buildSourcesForCurrentSefer();
+  return { seferKey: currentSeferKey(), folderLabel:b.folderLabel, groupLabel:b.groupLabel, sortKey:b.sortKey };
+}
+function folderLocation(label){
+  const c = scopeCards(label)[0]; if(!c) return null;
+  return { seferKey:c.seferKey, folderLabel:c.folderLabel || label, groupLabel:c.groupLabel || null, sortKey:c.sortKey };
+}
+function openCardAdder(loc){
+  if(!loc) return;
+  addingLoc = loc;
+  el('ca-loc').textContent = loc.folderLabel;
+  el('ca-topic').value = ''; el('ca-topic').placeholder = loc.folderLabel;
+  el('ca-question').value = ''; el('ca-answer').value = ''; el('ca-hint').textContent = '';
+  el('card-add-modal').classList.add('active');
+  el('ca-question').focus();
+}
+function closeCardAdder(){ el('card-add-modal').classList.remove('active'); addingLoc = null; }
+function saveManualCard(more){
+  if(!addingLoc) return;
+  const v = id => el(id).value.trim();
+  if(!v('ca-question') || !v('ca-answer')){ el('ca-hint').textContent = 'צריך לכתוב שאלה ותשובה.'; return; }
+  const loc = addingLoc;
+  cards.push({ ...newCardSkeleton(loc.seferKey, loc.folderLabel, { groupLabel: loc.groupLabel, sortKey: loc.sortKey }),
+    topic: v('ca-topic') || loc.folderLabel, summary:'', question: v('ca-question'), answer: v('ca-answer'), highlight:'',
+    sourceVerified:false, sourceRef:null, sourceText:null, manual:true });
+  saveCards(); showToast('השאלה נוספה לחזרה');
+  if(more){ openCardAdder(loc); el('ca-hint').textContent = `נוספה. אפשר לכתוב עוד שאלה על "${loc.folderLabel}"`; }
+  else closeCardAdder();
+  refreshAllViews();
+}
+el('btn-manual-add').addEventListener('click', () => {
+  el('new-err').style.display = 'none';
+  try{ openCardAdder(pickerLocation()); }
+  catch(e){ el('new-err').textContent = e.message || String(e); el('new-err').style.display = 'block'; }
+});
+el('btn-folder-manual-add').addEventListener('click', () => openCardAdder(folderLocation(currentDetailFolder)));
+el('btn-close-card-add').addEventListener('click', closeCardAdder);
+el('btn-ca-cancel').addEventListener('click', closeCardAdder);
+el('btn-ca-save').addEventListener('click', () => saveManualCard(false));
+el('btn-ca-more').addEventListener('click', () => saveManualCard(true));
+el('card-add-modal').addEventListener('click', e => { if(e.target.id === 'card-add-modal') closeCardAdder(); });
+
 // ---------- Folder browser (review scope) ----------
 function cardGroup(c){
   if(c.groupLabel) return c.groupLabel;
@@ -1844,6 +2133,8 @@ function folderDisplayLabel(label){
 }
 // collapsed groups are not rendered until opened; all clicks go through one listener
 let folderGroups = new Map();
+function dueCount(list){ return list.filter(c => dueRatio(c) >= 1).length; }
+function dueMeta(list){ const d = dueCount(list); return d ? ` · ${d} לחזרה` : ' · ✓ נבחן הכל'; }
 function folderItemsHtml(gcards){
   const byFolder = new Map();
   gcards.slice().sort(cardOrder).forEach(c => { const k = c.folderLabel || c.topic; if(!byFolder.has(k)) byFolder.set(k, []); byFolder.get(k).push(c); });
@@ -1852,7 +2143,7 @@ function folderItemsHtml(gcards){
     const extra = [...new Set(list.map(c => c.commentaryLabel).filter(Boolean))];
     const shown = extra.length ? `${label} (עם ${extra.join(', ')})` : label;
     return `<div class="folder-item" data-folder="${escapeHtml(label)}">
-        <span class="f-info"><span class="f-name">${escapeHtml(shown)}</span><span class="f-meta">${list.length} כרטיסיות${weak?' · ✗'+weak:''}</span></span>
+        <span class="f-info"><span class="f-name">${escapeHtml(shown)}</span><span class="f-meta">${list.length} כרטיסיות${dueMeta(list)}${weak?' · ✗'+weak:''}</span></span>
         <button class="btn small secondary f-test-btn" data-test-folder="${escapeHtml(label)}">▶ בדיקה</button>
       </div>`;
   }).join('');
@@ -1864,7 +2155,7 @@ function renderFolders(){
   folderGroups = new Map();
   cards.forEach(c => { if(dueRatio(c) >= 1) due++; const g = cardGroup(c); if(!folderGroups.has(g)) folderGroups.set(g, []); folderGroups.get(g).push(c); });
   let html = `<div class="hero-test">
-      <div><div class="h-title">מבחן חכם</div><div class="h-sub">${due ? due + ' כרטיסיות שהגיע זמנן לחזרה' : 'הכל מעודכן — אפשר גם לחזק'}</div></div>
+      <div><div class="h-title">מבחן חכם</div><div class="h-sub">${due ? due + ' כרטיסיות שהגיע זמנן לחזרה' : '✓ נבחן הכל. אפשר גם לחזק'}</div></div>
       <button class="btn" data-test-folder="__all__">▶ התחל</button>
     </div>
     <div class="section-label">או בחר נושא לבחינה:</div>`;
@@ -1874,7 +2165,7 @@ function renderFolders(){
     html += `<div class="group${open?' open':''}">
       <div class="group-head" data-group="${escapeHtml(gname)}">
         <span class="g-caret">${open?'▾':'◂'}</span><span class="g-name">${escapeHtml(gname)}</span>
-        <span class="g-meta">${nFolders} תיקיות · ${gcards.length} כרטיסיות</span>
+        <span class="g-meta">${nFolders} תיקיות · ${gcards.length} כרטיסיות${dueMeta(gcards)}</span>
         <button class="btn small secondary f-test-btn" data-test-folder="${escapeHtml('G::'+gname)}">▶ בדיקה</button>
       </div>
       <div class="group-body">${open ? folderItemsHtml(gcards) : ''}</div>
@@ -1908,7 +2199,8 @@ function showTimePicker(){
   el('time-picker').style.display = 'block';
   el('btn-back-folders').style.display = 'inline-flex';
   el('scope-note').textContent = folderDisplayLabel(pendingFolder);
-  el('auto-meta').textContent = autoSessionSize(pendingFolder) + ' כרטיסיות — לפי מה שהגיע זמנו';
+  const due = dueCount(scopeCards(pendingFolder)), size = autoSessionSize(pendingFolder);
+  el('auto-meta').textContent = due ? `${size} כרטיסיות שהגיע זמנן` : `✓ נבחן הכל · חיזוק של ${size} כרטיסיות`;
   el('review-scroll').scrollTop = 0;
 }
 // Smart session length: all cards due in scope (past ratio >= 1), at least 3, at most 30 (buffer, not backlog).
@@ -1922,7 +2214,7 @@ document.querySelectorAll('#time-picker-grid [data-minutes]').forEach(item => {
     const minutes = Number(item.dataset.minutes);
     activeFolder = pendingFolder;
     sessionLimit = auto ? autoSessionSize(pendingFolder) : (minutes > 0 ? Math.max(1, Math.round(minutes/2)) : null);
-    sessionCount = 0;
+    sessionCount = 0; sessionSeen = new Set(); sessionAuto = auto && dueCount(scopeCards(pendingFolder)) > 0;
     el('time-picker').style.display = 'none';
     enterActiveReview();
   });
@@ -1946,12 +2238,12 @@ el('btn-back-folders').addEventListener('click', () => {
   el('btn-back-folders').style.display = 'none';
   el('scope-note').textContent = '';
   el('review-scroll').scrollTop = 0;
-  pendingFolder = undefined; sessionLimit = null; sessionCount = 0; currentDetailFolder = undefined;
+  pendingFolder = undefined; sessionLimit = null; sessionCount = 0; sessionSeen = new Set(); sessionAuto = false; currentDetailFolder = undefined;
   renderBrowse();
 });
 el('btn-session-folders').addEventListener('click', () => el('btn-back-folders').click());
 el('btn-session-continue').addEventListener('click', () => {
-  sessionLimit = null;
+  sessionLimit = null; sessionAuto = false;
   el('session-done').style.display = 'none';
   el('review-content').style.display = 'block';
   renderReview();
@@ -1992,9 +2284,14 @@ function applyAssessment(card, assessment){
 function pickCard(){
   const pool = reviewPool();
   if(pool.length === 0) return null;
-  const cand = pool.length > 1 && currentCard ? pool.filter(c => c.id !== currentCard.id) : pool;
-  const scored = cand.map(c => ({ c, p: dueRatio(c) + Math.max(0, weaknessScore(c))*0.08 + Math.random()*0.15 })).sort((x,y) => y.p - x.p);
-  const top = scored.slice(0, Math.min(3, scored.length));
+  let cand = pool.length > 1 && currentCard ? pool.filter(c => c.id !== currentCard.id) : pool;
+  // a session does not repeat a card while others are left, and takes the due cards first
+  const unseen = cand.filter(c => !sessionSeen.has(c.id)); if(unseen.length) cand = unseen;
+  const due = cand.filter(c => dueRatio(c) >= 1); if(due.length) cand = due;
+  // variety: a card from the same place as the last one waits when there is something else
+  const last = currentCard ? (currentCard.sourceRef || currentCard.folderLabel) : null;
+  const scored = cand.map(c => ({ c, p: dueRatio(c) + Math.max(0, weaknessScore(c))*0.08 + Math.random()*0.15 - (last && (c.sourceRef || c.folderLabel) === last ? 0.6 : 0) })).sort((x,y) => y.p - x.p);
+  const top = scored.filter(x => x.p > scored[0].p - 0.3).slice(0, 3);
   return top[Math.floor(Math.random()*top.length)].c;
 }
 function showToast(msg){
@@ -2056,9 +2353,15 @@ function resetPostAnswerUI(){
 function showSessionDone(){
   el('question-view').style.display='none'; el('highlight-view').style.display='none';
   el('review-content').style.display='none'; el('session-done').style.display='block';
+  const left = dueCount(reviewPool());
+  el('session-done-msg').textContent = left
+    ? `${sessionAuto ? 'סיימת את המבחן' : 'סיימת את הזמן שקבעת'} 👏 נשארו עוד ${left} כרטיסיות שהגיע זמנן.`
+    : '✓ נבחן הכל! אין עוד כרטיסיות שהגיע זמנן כאן 👏';
+  el('btn-session-continue').textContent = left ? 'להמשיך עוד קצת' : 'לחזק עוד קצת';
 }
 function nextCardOrFinish(){
   if(sessionLimit && sessionCount >= sessionLimit){ showSessionDone(); return; }
+  if(sessionAuto && sessionCount > 0 && !dueCount(reviewPool())){ showSessionDone(); return; }
   renderReview();
 }
 function renderReview(){
@@ -2067,9 +2370,10 @@ function renderReview(){
   const pool = reviewPool();
   if(pool.length === 0){ el('question-view').style.display='none'; el('highlight-view').style.display='none'; return; }
   currentCard = pickCard();
+  sessionSeen.add(currentCard.id);
   const setting = getReviewModeSetting();
   let showHighlight;
-  if(setting === 'highlights') showHighlight = true;
+  if(setting === 'highlights') showHighlight = !!currentCard.highlight;
   else if(setting === 'questions') showHighlight = false;
   else showHighlight = currentCard.highlight && Math.random() < 0.4;
   reviewMode = showHighlight ? 'highlight' : 'question';
@@ -2365,6 +2669,7 @@ function sanitizeCard(ic){
   CARD_NUM.forEach(k => { const n = Number(ic[k]); c[k] = Number.isFinite(n) ? n : (k === 'sortKey' ? null : 0); });
   c.sourceVerified = !!ic.sourceVerified;
   if(ic.userEdited) c.userEdited = true;
+  if(ic.manual) c.manual = true;
   ['topic','summary','question','answer','highlight'].forEach(k => { if(c[k] === null) c[k] = ''; });
   if(c.kind !== 'machloket') c.kind = 'regular';
   if(!c.createdAt) c.createdAt = new Date().toISOString();
@@ -2418,7 +2723,7 @@ el('import-file').addEventListener('change', async (e) => {
   const hide = () => { sp.classList.add('hide'); setTimeout(() => sp.remove(), 500); };
   if(seen) sp.remove(); else { sp.addEventListener('click', hide); setTimeout(hide, 1100); }
 })();
-el('app-version').textContent = `גרסה ${APP_VERSION}`;
+el('app-version').textContent = `גרסה ${APP_VERSION}${EDITION === 'netfree' ? ' · נטפרי' : ''}`;
 
 // ---------- Updates: a gentle notice when a newer version is published ----------
 const UPDATE_DISMISS_KEY = 'chazara_update_dismissed_v1';
